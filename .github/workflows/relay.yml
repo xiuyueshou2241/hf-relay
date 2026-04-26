@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       hf_file:
-        description: 'File path in repo (e.g., wan2.1_infinitetalk_multi_14B_quanto_mbf16_int8.safetensors). Comma-separated for multiple files.'
+        description: 'File path in repo (e.g., text_encoders/clip_l.safetensors). Comma-separated for multiple files.'
         required: true
         type: string
       release_tag:
@@ -25,6 +25,8 @@ on:
         required: false
         default: '1900'
         type: string
+  repository_dispatch:
+    types: [hf-relay]
 
 jobs:
   download:
@@ -33,21 +35,39 @@ jobs:
       contents: write
     timeout-minutes: 120
     steps:
-      - name: Download from HuggingFace
+      - name: Parse inputs
         env:
-          HF_REPO: ${{ github.event.inputs.hf_repo }}
-          HF_FILES: ${{ github.event.inputs.hf_file }}
-          HF_BRANCH: ${{ github.event.inputs.hf_branch }}
+          DISPATCH inputs: ${{ toJson(github.event.client_payload) }}
         run: |
-          IFS=',' read -ra FILES <<< "$HF_FILES"
+          # Handle both workflow_dispatch and repository_dispatch
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "HF_REPO=${{ github.event.client_payload.hf_repo }}" >> $GITHUB_ENV
+            echo "HF_FILE=${{ github.event.client_payload.hf_file }}" >> $GITHUB_ENV
+            echo "RELEASE_TAG=${{ github.event.client_payload.release_tag }}" >> $GITHUB_ENV
+            echo "HF_BRANCH=${{ github.event.client_payload.hf_branch || 'main' }}" >> $GITHUB_ENV
+            echo "CHUNK_SIZE=${{ github.event.client_payload.chunk_size || '1900' }}" >> $GITHUB_ENV
+          else
+            echo "HF_REPO=${{ github.event.inputs.hf_repo }}" >> $GITHUB_ENV
+            echo "HF_FILE=${{ github.event.inputs.hf_file }}" >> $GITHUB_ENV
+            echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+            echo "HF_BRANCH=${{ github.event.inputs.hf_branch }}" >> $GITHUB_ENV
+            echo "CHUNK_SIZE=${{ github.event.inputs.chunk_size }}" >> $GITHUB_ENV
+          fi
+          echo "📦 Repo: $HF_REPO"
+          echo "📦 File: $HF_FILE"
+          echo "🏷️  Tag: $RELEASE_TAG"
+          echo "🌿 Branch: $HF_BRANCH"
+
+      - name: Download from HuggingFace
+        run: |
+          IFS=',' read -ra FILES <<< "$HF_FILE"
           for file in "${FILES[@]}"; do
-            file=$(echo "$file" | xargs)  # trim whitespace
+            file=$(echo "$file" | xargs)
             filename=$(basename "$file")
             URL="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}/${file}"
             echo "⬇️ Downloading ${file} from ${HF_REPO}..."
             echo "   URL: ${URL}"
             
-            # Try wget first, fall back to curl
             if ! wget --tries=3 --timeout=60 -q --show-progress -O "${filename}" "${URL}"; then
               echo "wget failed, trying curl..."
               curl -L --retry 3 --max-time 600 -o "${filename}" "${URL}"
@@ -64,8 +84,6 @@ jobs:
           done
 
       - name: Split large files
-        env:
-          CHUNK_SIZE: ${{ github.event.inputs.chunk_size }}
         run: |
           for file in *.safetensors *.bin *.pt *.pth *.gguf *.onnx *.ckpt; do
             [ -f "$file" ] || continue
@@ -77,7 +95,6 @@ jobs:
               echo "✂️ ${file} (${FILE_SIZE_MB}MB) exceeds ${CHUNK_SIZE}MB, splitting..."
               split -b "${CHUNK_SIZE}M" "$file" "${file}.part_"
               rm "$file"
-              echo "SPLIT_${file}=true" >> $GITHUB_ENV
             else
               echo "📦 ${file} (${FILE_SIZE_MB}MB) within size limit"
             fi
@@ -85,20 +102,18 @@ jobs:
 
       - name: Create Release and Upload
         env:
-          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Create release
           gh release create "${RELEASE_TAG}" \
-            --title "HF: ${{ github.event.inputs.hf_repo }}/${{ github.event.inputs.hf_file }}" \
+            --title "HF: ${HF_REPO}" \
             --notes "Auto-relayed from HuggingFace
           
-          - **Repo**: ${{ github.event.inputs.hf_repo }}
-          - **File**: ${{ github.event.inputs.hf_file }}
-          - **Branch**: ${{ github.event.inputs.hf_branch }}
+          - **Repo**: ${HF_REPO}
+          - **File**: ${HF_FILE}
+          - **Branch**: ${HF_BRANCH}
           - **Date**: $(date -u '+%Y-%m-%d %H:%M UTC')" || true
           
-          # Upload all files (original, chunks, md5)
+          # Upload all files
           for f in *.safetensors *.bin *.pt *.pth *.gguf *.onnx *.ckpt *.md5 *.part_*; do
             [ -f "$f" ] || continue
             echo "⬆️ Uploading ${f}..."
