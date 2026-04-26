@@ -54,35 +54,45 @@ jobs:
           fi
           echo "📦 Repo: $HF_REPO | File: $HF_FILE | Tag: $RELEASE_TAG | Branch: $HF_BRANCH"
 
+      - name: Install huggingface-cli
+        run: |
+          pip install -U huggingface_hub hf_transfer
+          echo "HF_HUB_ENABLE_HF_TRANSFER=1" >> $GITHUB_ENV
+
       - name: Download from HuggingFace
         run: |
           IFS=',' read -ra FILES <<< "$HF_FILE"
+          mkdir -p /tmp/hf-download
+          
           for file in "${FILES[@]}"; do
             file=$(echo "$file" | xargs)
             filename=$(basename "$file")
-            URL="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}/${file}"
             echo "⬇️ Downloading ${filename} from ${HF_REPO}..."
-            echo "   URL: ${URL}"
             
-            # Use curl with follow redirects and proper LFS support
-            curl -L --retry 3 --retry-delay 5 --max-time 1800 \
-              -H "Accept: application/octet-stream" \
-              -o "${filename}" "${URL}"
+            # Use huggingface-cli which handles LFS properly
+            huggingface-cli download "${HF_REPO}" "${file}" \
+              --revision "${HF_BRANCH}" \
+              --local-dir /tmp/hf-download \
+              --local-dir-use-symlinks False
+            
+            # Move to working directory
+            mv "/tmp/hf-download/${file}" "${filename}"
             
             if [ ! -f "${filename}" ] || [ ! -s "${filename}" ]; then
               echo "❌ Failed to download ${filename}"
               exit 1
             fi
             
-            ACTUAL_SIZE=$(stat -c%s "${filename}")
-            echo "   Size: ${ACTUAL_SIZE} bytes"
-            
-            # Verify it's not an HTML error page (HF returns HTML for 404/403)
-            if file "${filename}" | grep -q "HTML"; then
-              echo "❌ Downloaded HTML instead of binary - URL may be wrong"
-              head -5 "${filename}"
+            # Check it's not a LFS pointer (starts with "version https://git-lfs")
+            if head -1 "${filename}" | grep -q "version https://git-lfs"; then
+              echo "❌ Got LFS pointer instead of real file!"
+              cat "${filename}"
               exit 1
             fi
+            
+            ACTUAL_SIZE=$(stat -c%s "${filename}")
+            FILE_SIZE_MB=$((ACTUAL_SIZE / 1024 / 1024))
+            echo "   Size: ${FILE_SIZE_MB}MB (${ACTUAL_SIZE} bytes)"
             
             md5sum "${filename}" > "${filename}.md5"
             echo "✅ ${filename} downloaded successfully"
