@@ -1,8 +1,108 @@
-name: Test Workflow
+name: HF Relay Download
+
 on:
   workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: 'HuggingFace repo (e.g., DeepBeepMeep/Wan2.1)'
+        required: true
+        type: string
+      hf_file:
+        description: 'File path in repo (e.g., wan2.1_infinitetalk_multi_14B_quanto_mbf16_int8.safetensors). Comma-separated for multiple files.'
+        required: true
+        type: string
+      release_tag:
+        description: 'Release tag (e.g., infinitetalk-multi)'
+        required: true
+        type: string
+      hf_branch:
+        description: 'Branch/ref (default: main)'
+        required: false
+        default: 'main'
+        type: string
+      chunk_size:
+        description: 'Split chunk size in MB (default: 1900 for GitHub 2GB limit)'
+        required: false
+        default: '1900'
+        type: string
+
 jobs:
-  test:
+  download:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 120
     steps:
-      - run: echo hello
+      - name: Download from HuggingFace
+        env:
+          HF_REPO: ${{ github.event.inputs.hf_repo }}
+          HF_FILES: ${{ github.event.inputs.hf_file }}
+          HF_BRANCH: ${{ github.event.inputs.hf_branch }}
+        run: |
+          IFS=',' read -ra FILES <<< "$HF_FILES"
+          for file in "${FILES[@]}"; do
+            file=$(echo "$file" | xargs)  # trim whitespace
+            filename=$(basename "$file")
+            URL="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}/${file}"
+            echo "⬇️ Downloading ${file} from ${HF_REPO}..."
+            echo "   URL: ${URL}"
+            
+            # Try wget first, fall back to curl
+            if ! wget --tries=3 --timeout=60 -q --show-progress -O "${filename}" "${URL}"; then
+              echo "wget failed, trying curl..."
+              curl -L --retry 3 --max-time 600 -o "${filename}" "${URL}"
+            fi
+            
+            if [ ! -f "${filename}" ] || [ ! -s "${filename}" ]; then
+              echo "❌ Failed to download ${filename}"
+              exit 1
+            fi
+            
+            ls -lh "${filename}"
+            md5sum "${filename}" > "${filename}.md5"
+            echo "✅ ${filename} downloaded successfully"
+          done
+
+      - name: Split large files
+        env:
+          CHUNK_SIZE: ${{ github.event.inputs.chunk_size }}
+        run: |
+          for file in *.safetensors *.bin *.pt *.pth *.gguf *.onnx *.ckpt; do
+            [ -f "$file" ] || continue
+            
+            FILE_SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
+            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+            
+            if [ "$FILE_SIZE_MB" -gt "$CHUNK_SIZE" ]; then
+              echo "✂️ ${file} (${FILE_SIZE_MB}MB) exceeds ${CHUNK_SIZE}MB, splitting..."
+              split -b "${CHUNK_SIZE}M" "$file" "${file}.part_"
+              rm "$file"
+              echo "SPLIT_${file}=true" >> $GITHUB_ENV
+            else
+              echo "📦 ${file} (${FILE_SIZE_MB}MB) within size limit"
+            fi
+          done
+
+      - name: Create Release and Upload
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create release
+          gh release create "${RELEASE_TAG}" \
+            --title "HF: ${{ github.event.inputs.hf_repo }}/${{ github.event.inputs.hf_file }}" \
+            --notes "Auto-relayed from HuggingFace
+          
+          - **Repo**: ${{ github.event.inputs.hf_repo }}
+          - **File**: ${{ github.event.inputs.hf_file }}
+          - **Branch**: ${{ github.event.inputs.hf_branch }}
+          - **Date**: $(date -u '+%Y-%m-%d %H:%M UTC')" || true
+          
+          # Upload all files (original, chunks, md5)
+          for f in *.safetensors *.bin *.pt *.pth *.gguf *.onnx *.ckpt *.md5 *.part_*; do
+            [ -f "$f" ] || continue
+            echo "⬆️ Uploading ${f}..."
+            gh release upload "${RELEASE_TAG}" "$f" --clobber
+          done
+          
+          echo "✅ Release ${RELEASE_TAG} ready!"
