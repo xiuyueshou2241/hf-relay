@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       hf_file:
-        description: 'File path in repo (e.g., text_encoders/clip_l.safetensors). Comma-separated for multiple files.'
+        description: 'File path in repo (e.g., text_encoders/clip_l.safetensors). Comma-separated for multiple.'
         required: true
         type: string
       release_tag:
@@ -21,7 +21,7 @@ on:
         default: 'main'
         type: string
       chunk_size:
-        description: 'Split chunk size in MB (default: 1900 for GitHub 2GB limit)'
+        description: 'Split chunk size in MB (default: 1900)'
         required: false
         default: '1900'
         type: string
@@ -35,11 +35,10 @@ jobs:
       contents: write
     timeout-minutes: 120
     steps:
+      - uses: actions/checkout@v4
+
       - name: Parse inputs
-        env:
-          DISPATCH inputs: ${{ toJson(github.event.client_payload) }}
         run: |
-          # Handle both workflow_dispatch and repository_dispatch
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             echo "HF_REPO=${{ github.event.client_payload.hf_repo }}" >> $GITHUB_ENV
             echo "HF_FILE=${{ github.event.client_payload.hf_file }}" >> $GITHUB_ENV
@@ -53,10 +52,7 @@ jobs:
             echo "HF_BRANCH=${{ github.event.inputs.hf_branch }}" >> $GITHUB_ENV
             echo "CHUNK_SIZE=${{ github.event.inputs.chunk_size }}" >> $GITHUB_ENV
           fi
-          echo "📦 Repo: $HF_REPO"
-          echo "📦 File: $HF_FILE"
-          echo "🏷️  Tag: $RELEASE_TAG"
-          echo "🌿 Branch: $HF_BRANCH"
+          echo "📦 Repo: $HF_REPO | File: $HF_FILE | Tag: $RELEASE_TAG | Branch: $HF_BRANCH"
 
       - name: Download from HuggingFace
         run: |
@@ -65,20 +61,29 @@ jobs:
             file=$(echo "$file" | xargs)
             filename=$(basename "$file")
             URL="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}/${file}"
-            echo "⬇️ Downloading ${file} from ${HF_REPO}..."
+            echo "⬇️ Downloading ${filename} from ${HF_REPO}..."
             echo "   URL: ${URL}"
             
-            if ! wget --tries=3 --timeout=60 -q --show-progress -O "${filename}" "${URL}"; then
-              echo "wget failed, trying curl..."
-              curl -L --retry 3 --max-time 600 -o "${filename}" "${URL}"
-            fi
+            # Use curl with follow redirects and proper LFS support
+            curl -L --retry 3 --retry-delay 5 --max-time 1800 \
+              -H "Accept: application/octet-stream" \
+              -o "${filename}" "${URL}"
             
             if [ ! -f "${filename}" ] || [ ! -s "${filename}" ]; then
               echo "❌ Failed to download ${filename}"
               exit 1
             fi
             
-            ls -lh "${filename}"
+            ACTUAL_SIZE=$(stat -c%s "${filename}")
+            echo "   Size: ${ACTUAL_SIZE} bytes"
+            
+            # Verify it's not an HTML error page (HF returns HTML for 404/403)
+            if file "${filename}" | grep -q "HTML"; then
+              echo "❌ Downloaded HTML instead of binary - URL may be wrong"
+              head -5 "${filename}"
+              exit 1
+            fi
+            
             md5sum "${filename}" > "${filename}.md5"
             echo "✅ ${filename} downloaded successfully"
           done
@@ -87,7 +92,6 @@ jobs:
         run: |
           for file in *.safetensors *.bin *.pt *.pth *.gguf *.onnx *.ckpt; do
             [ -f "$file" ] || continue
-            
             FILE_SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
             FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
             
@@ -107,13 +111,12 @@ jobs:
           gh release create "${RELEASE_TAG}" \
             --title "HF: ${HF_REPO}" \
             --notes "Auto-relayed from HuggingFace
-          
+
           - **Repo**: ${HF_REPO}
           - **File**: ${HF_FILE}
           - **Branch**: ${HF_BRANCH}
           - **Date**: $(date -u '+%Y-%m-%d %H:%M UTC')" || true
           
-          # Upload all files
           for f in *.safetensors *.bin *.pt *.pth *.gguf *.onnx *.ckpt *.md5 *.part_*; do
             [ -f "$f" ] || continue
             echo "⬆️ Uploading ${f}..."
