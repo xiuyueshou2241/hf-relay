@@ -54,7 +54,7 @@ jobs:
           fi
           echo "📦 Repo: $HF_REPO | File: $HF_FILE | Tag: $RELEASE_TAG | Branch: $HF_BRANCH"
 
-      - name: Install huggingface-cli
+      - name: Install hf CLI
         run: |
           pip install -U huggingface_hub hf_transfer
           echo "HF_HUB_ENABLE_HF_TRANSFER=1" >> $GITHUB_ENV
@@ -69,13 +69,13 @@ jobs:
             filename=$(basename "$file")
             echo "⬇️ Downloading ${filename} from ${HF_REPO}..."
             
-            # Use huggingface-cli which handles LFS properly
-            huggingface-cli download "${HF_REPO}" "${file}" \
+            # Use hf download (replaces deprecated huggingface-cli)
+            hf download "${HF_REPO}" "${file}" \
               --revision "${HF_BRANCH}" \
               --local-dir /tmp/hf-download \
               --local-dir-use-symlinks False
             
-            # Move to working directory
+            # Move to working directory with clean filename
             mv "/tmp/hf-download/${file}" "${filename}"
             
             if [ ! -f "${filename}" ] || [ ! -s "${filename}" ]; then
@@ -83,8 +83,8 @@ jobs:
               exit 1
             fi
             
-            # Check it's not a LFS pointer (starts with "version https://git-lfs")
-            if head -1 "${filename}" | grep -q "version https://git-lfs"; then
+            # Check it's not a LFS pointer
+            if head -1 "${filename}" 2>/dev/null | grep -q "version https://git-lfs"; then
               echo "❌ Got LFS pointer instead of real file!"
               cat "${filename}"
               exit 1
