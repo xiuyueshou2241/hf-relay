@@ -69,11 +69,9 @@ jobs:
             filename=$(basename "$file")
             echo "⬇️ Downloading ${filename} from ${HF_REPO}..."
             
-            # Use hf download (replaces deprecated huggingface-cli)
             hf download "${HF_REPO}" "${file}" \
               --revision "${HF_BRANCH}" \
-              --local-dir /tmp/hf-download \
-              --local-dir-use-symlinks False
+              --local-dir /tmp/hf-download
             
             # Move to working directory with clean filename
             mv "/tmp/hf-download/${file}" "${filename}"
